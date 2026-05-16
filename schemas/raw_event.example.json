@@ -1,0 +1,16 @@
+{
+  "event_id": "evt_01hxyz",
+  "occurred_at": "2026-05-16T23:05:01.000Z",
+  "site_id": "site_123",
+  "event_type": "search",
+  "session_id": "sess_abc",
+  "user_id": "user_456",
+  "url": "https://example.com/search?q=shoes&utm_source=email",
+  "referrer": "https://google.com",
+  "properties": {
+    "query": "running shoes",
+    "zero_results": false,
+    "product_id": null,
+    "category_id": "cat_9"
+  }
+}
