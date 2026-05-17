@@ -25,7 +25,7 @@ def build_bronze_stream(
     cfg = config or LakehouseConfig.from_env()
 
     schema_location = (
-        f"{cfg.checkpoint_base}/schemas/{cfg.bronze_table}"
+        f"/Volumes/behavr/bronze/pipeline_state/schemas/{cfg.bronze_table}"
     )
 
     return (
@@ -81,7 +81,7 @@ def start_bronze_stream(
     cfg = config or LakehouseConfig.from_env()
 
     checkpoint_location = (
-        f"{cfg.checkpoint_base}/checkpoints/{cfg.bronze_table}"
+        f"/Volumes/behavr/bronze/pipeline_state/checkpoints/{cfg.bronze_table}"
     )
 
     print("Starting bronze raw events ingestion")
