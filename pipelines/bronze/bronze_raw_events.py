@@ -52,7 +52,7 @@ def with_bronze_columns(df: DataFrame) -> DataFrame:
         .withColumnRenamed("receivedAt", "received_at")
         .withColumnRenamed("sessionId", "session_id")
         .withColumnRenamed("anonymousId", "anonymous_id")
-        .withColumnRenamed("siteId", "site_id")
+        .withColumnRenamed("siteId", "event_site_id")
         .withColumnRenamed("userAgent", "user_agent")
         .withColumnRenamed("deviceType", "device_type")
         .withColumnRenamed("browserLanguage", "browser_language")
