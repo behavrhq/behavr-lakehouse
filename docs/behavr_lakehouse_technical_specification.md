@@ -1,5 +1,5 @@
 # Behavr Lakehouse
-## AI Agent Development Specification
+## Technical Development Specification
 
 This document describes the target architecture and implementation requirements for the `behavr-lakehouse` repository.
 
