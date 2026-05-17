@@ -44,6 +44,21 @@ def with_bronze_columns(df: DataFrame) -> DataFrame:
     Add ingestion metadata and normalized event_date partition column.
     """
 
+    df = (
+        df
+        .withColumnRenamed("eventId", "event_id")
+        .withColumnRenamed("eventType", "event_type")
+        .withColumnRenamed("occurredAt", "occurred_at")
+        .withColumnRenamed("receivedAt", "received_at")
+        .withColumnRenamed("sessionId", "session_id")
+        .withColumnRenamed("anonymousId", "anonymous_id")
+        .withColumnRenamed("siteId", "site_id")
+        .withColumnRenamed("userAgent", "user_agent")
+        .withColumnRenamed("deviceType", "device_type")
+        .withColumnRenamed("browserLanguage", "browser_language")
+        .withColumnRenamed("sdkVersion", "sdk_version")
+    )
+
     occurred_at_ts = F.coalesce(
         F.to_timestamp(F.col("occurred_at")),
         F.to_timestamp(
