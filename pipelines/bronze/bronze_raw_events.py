@@ -74,7 +74,7 @@ def with_bronze_columns(df: DataFrame) -> DataFrame:
     return (
         df
         .withColumn("_ingested_at", F.current_timestamp())
-        .withColumn("_source_file", F.input_file_name())
+        .withColumn("_source_file", F.col("_metadata.file_path"))
         .withColumn("occurred_at_ts", occurred_at_ts)
         .withColumn(
             "event_date",
