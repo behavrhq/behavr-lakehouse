@@ -61,3 +61,19 @@ def run_silver_merge(
         WHEN NOT MATCHED THEN INSERT *
         """
     )
+
+
+if __name__ == "__main__":
+    spark = SparkSession.builder.getOrCreate()
+    cfg = LakehouseConfig.from_env()
+
+    print("Starting silver events pipeline")
+    print(f"Reading from: {cfg.bronze_fqn}")
+    print(f"Writing to: {cfg.silver_fqn}")
+
+    run_silver_merge(
+        spark=spark,
+        config=cfg,
+    )
+
+    print("Silver events pipeline completed")
