@@ -68,3 +68,19 @@ def run_gold_product_metrics(
         """,
         partition_cols=["event_date"],
     )
+
+
+if __name__ == "__main__":
+    spark = SparkSession.builder.getOrCreate()
+    cfg = LakehouseConfig.from_env()
+
+    print("Starting gold product metrics pipeline")
+    print(f"Reading from: {cfg.silver_fqn}")
+    print("Writing to: product_metrics")
+
+    run_gold_product_metrics(
+        spark=spark,
+        config=cfg,
+    )
+
+    print("Gold product metrics pipeline completed")
