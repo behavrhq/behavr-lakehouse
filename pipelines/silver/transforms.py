@@ -1,5 +1,8 @@
 """
 Silver transforms: UTC timestamps, dedupe keys, URL cleanup, UTM, flattened properties.
+
+Bronze normalizes camelCase SDK fields (see ``with_bronze_columns``); silver maps those
+to analytics-friendly names (e.g. ``event_site_id`` → ``site_id``, ``anonymous_id`` → ``user_id``).
 """
 
 from __future__ import annotations
@@ -24,7 +27,22 @@ def _get_prop(df: DataFrame, name: str):
     return F.get_json_object(_properties_json_expr(df), f"$.{name}")
 
 
+def _col_or_null(df: DataFrame, name: str):
+    return F.col(name) if name in df.columns else F.lit(None).cast("string")
+
+
 def normalize_silver_events(df: DataFrame) -> DataFrame:
+    fields = set(df.columns)
+
+    site_id = F.coalesce(
+        _col_or_null(df, "event_site_id"),
+        _col_or_null(df, "site_id"),
+    )
+    user_id = F.coalesce(
+        _col_or_null(df, "user_id"),
+        _col_or_null(df, "anonymous_id"),
+    )
+
     occurred = F.coalesce(
         F.to_timestamp(F.col("occurred_at")),
         F.col("occurred_at_ts"),
@@ -32,7 +50,11 @@ def normalize_silver_events(df: DataFrame) -> DataFrame:
         F.to_timestamp(F.col("occurred_at"), "yyyy-MM-dd'T'HH:mm:ss'Z'"),
     )
     occurred_utc = F.to_utc_timestamp(occurred, "UTC")
-    url = F.coalesce(F.col("url"), F.col("page_url"), F.lit(""))
+
+    url_candidates = [_col_or_null(df, "url"), _col_or_null(df, "page_url")]
+    if "pageUrl" in fields:
+        url_candidates.insert(0, F.col("pageUrl"))
+    url = F.coalesce(*url_candidates, F.lit(""))
     cleaned_url = F.regexp_replace(F.trim(url), r"\s+", "")
     utm_source = F.coalesce(_get_prop(df, "utm_source"), F.lit(None))
     utm_medium = F.coalesce(_get_prop(df, "utm_medium"), F.lit(None))
@@ -49,8 +71,12 @@ def normalize_silver_events(df: DataFrame) -> DataFrame:
     )
     zero_results_bool = F.lower(zero_results.cast("string")).isin("true", "1", "yes")
 
+    referrer = _col_or_null(df, "referrer")
+
     return (
-        df.filter(F.col("event_id").isNotNull() & F.col("site_id").isNotNull() & occurred_utc.isNotNull())
+        df.withColumn("site_id", site_id)
+        .withColumn("user_id", user_id)
+        .filter(F.col("event_id").isNotNull() & F.col("site_id").isNotNull() & occurred_utc.isNotNull())
         .withColumn("occurred_at_utc", occurred_utc)
         .withColumn("event_date", F.to_date(F.col("occurred_at_utc")))
         .withColumn("event_hour", F.hour(F.col("occurred_at_utc")))
@@ -78,7 +104,7 @@ def normalize_silver_events(df: DataFrame) -> DataFrame:
             "category_id",
             "zero_results",
             "page_url",
-            F.col("referrer").cast("string").alias("referrer"),
+            referrer.cast("string").alias("referrer"),
             "utm_source",
             "utm_medium",
             "utm_campaign",

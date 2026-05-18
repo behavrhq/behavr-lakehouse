@@ -23,7 +23,10 @@ def read_silver_events(
     for_event_dates: Sequence[date] | None = None,
 ) -> DataFrame:
     """
-    Read silver.events, optionally scoped to specific ``event_date`` values.
+    Read ``behavr.silver.events``, optionally scoped to specific ``event_date`` values.
+
+    Silver exposes canonical dimensions (``site_id``, ``user_id``) mapped from bronze
+    ``event_site_id`` and ``anonymous_id`` / ``user_id`` during the silver transform.
 
     Passing ``for_event_dates`` recomputes metrics only for those partitions while
     still using the canonical silver layer (correct counts for those dates).

@@ -31,8 +31,9 @@ def task_silver_events(
     spark: SparkSession,
     *,
     since_ingested_at: datetime | None = None,
+    since_received_at: datetime | None = None,
 ) -> None:
-    run_silver_merge(spark, since_ingested_at=since_ingested_at)
+    run_silver_merge(spark, since_ingested_at=since_ingested_at, since_received_at=since_received_at)
 
 
 def task_gold_all(

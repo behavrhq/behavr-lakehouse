@@ -72,3 +72,21 @@ def test_zero_results_coercion(spark):
     raw = spark.createDataFrame(rows, schema)
     row = normalize_silver_events(raw).first()
     assert row["zero_results"] is True
+
+
+def test_bronze_sdk_column_names_map_to_silver(spark):
+    """Bronze renames siteId → event_site_id and anonymousId → anonymous_id."""
+    schema = T.StructType(
+        [
+            T.StructField("event_id", T.StringType()),
+            T.StructField("occurred_at", T.StringType()),
+            T.StructField("event_site_id", T.StringType()),
+            T.StructField("event_type", T.StringType()),
+            T.StructField("anonymous_id", T.StringType()),
+        ]
+    )
+    rows = [("e1", "2026-05-16T12:00:00Z", "shop-1", "page_view", "anon-9")]
+    raw = spark.createDataFrame(rows, schema)
+    row = normalize_silver_events(raw).first()
+    assert row["site_id"] == "shop-1"
+    assert row["user_id"] == "anon-9"
