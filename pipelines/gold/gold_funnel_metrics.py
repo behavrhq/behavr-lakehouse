@@ -49,3 +49,19 @@ def run_gold_funnel_metrics(
         """,
         partition_cols=["event_date"],
     )
+
+
+if __name__ == "__main__":
+    spark = SparkSession.builder.getOrCreate()
+    cfg = LakehouseConfig.from_env()
+
+    print("Starting gold funnel metrics pipeline")
+    print(f"Reading from: {cfg.silver_fqn}")
+    print("Writing to: funnel_metrics")
+
+    run_gold_funnel_metrics(
+        spark=spark,
+        config=cfg,
+    )
+
+    print("Gold funnel metrics pipeline completed")

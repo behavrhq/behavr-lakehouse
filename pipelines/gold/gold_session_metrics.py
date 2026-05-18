@@ -71,3 +71,19 @@ def run_gold_session_metrics(
         merge_condition="t.site_id = s.site_id AND t.event_date = s.event_date",
         partition_cols=["event_date"],
     )
+
+
+if __name__ == "__main__":
+    spark = SparkSession.builder.getOrCreate()
+    cfg = LakehouseConfig.from_env()
+
+    print("Starting gold session metrics pipeline")
+    print(f"Reading from: {cfg.silver_fqn}")
+    print("Writing to: session_metrics")
+
+    run_gold_session_metrics(
+        spark=spark,
+        config=cfg,
+    )
+
+    print("Gold session metrics pipeline completed")
