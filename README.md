@@ -1,140 +1,232 @@
 # Behavr Lakehouse
 
-Historical analytics and transformation layer for the Behavr platform: ingest raw behavioral JSONL from object storage, land **Bronze** Delta tables with Auto Loader, clean and dedupe in **Silver**, and publish **Gold** metrics for BI and downstream ML feature preparation.
+Historical analytics layer for Behavr: raw behavioral JSONL in object storage is ingested into **Delta** on Databricks using **Auto Loader** (Bronze), normalized and deduplicated (**Silver**), then aggregated for BI and downstream use (**Gold**).
+
+---
 
 ## Architecture
 
+End-to-end data flow from clients through storage to the lakehouse:
+
 ```mermaid
 flowchart LR
-    A[Behavr SDK]
-    B[Collector API]
-    C[Kafka]
-    D[Storage Sink]
-    E[Raw JSONL in Object Storage]
+    subgraph upstream
+        A[Behavr SDK]
+        B[Collector API]
+        C[Kafka]
+        D[Storage sink]
+    end
 
-    F[Databricks Auto Loader]
-    G[Bronze Delta]
-    H[Silver Delta]
-    I[Gold Analytics]
+    E[Raw JSONL in object storage]
+
+    subgraph databricks
+        F[Auto Loader]
+        G[Bronze Delta]
+        H[Silver Delta]
+        I[Gold Delta]
+    end
 
     A --> B
     B --> C
     C --> D
     D --> E
-
     E --> F
     F --> G
     G --> H
     H --> I
 ```
 
-- **Raw** (`s3://behavr-lake/raw/events/`): append-only JSONL, hive-style paths such as `site_id=…/date=…/hour=…/`.
-- **Bronze** (`behavr.bronze.raw_events`): Auto Loader streaming, schema inference and evolution, checkpoints, ingestion metadata (`_ingested_at`, `_source_file`), partitioned by `event_date` from `occurred_at`.
-- **Silver** (`behavr.silver.events`): `MERGE` incremental load, **deduplication on `event_id`** (latest `occurred_at_utc` wins), UTC timestamps, flattened `properties` (`search_query`, `product_id`, `category_id`), URL cleanup, UTM fields, basic null checks on `event_id`, `site_id`, and timestamps.
-- **Gold**: aggregated tables — `search_metrics`, `product_metrics`, `session_metrics`, `page_metrics`, `funnel_metrics` — updated via `MERGE` for idempotent refreshes; optional `for_event_dates` scopes recomputation to specific `event_date` partitions.
+- **Upstream** produces append-only files (for example under `s3://behavr-lake/raw/events/` with hive-style prefixes such as `site_id=…/date=…/hour=…/`).
+- **Databricks** runs scheduled jobs: each stage reads the previous layer (or raw paths for Bronze), writes Unity Catalog Delta tables, and uses checkpoints or `MERGE` for incremental, replay-friendly processing.
 
-## Medallion principles
+---
 
-1. Raw and Bronze stay append-oriented; Bronze preserves source fidelity with minimal transforms.
-2. Silver is the canonical, deduped event layer for analytics.
-3. Gold holds business-facing aggregates and metrics, not raw events.
+## Bronze, Silver, and Gold
 
-## Unity Catalog layout
+### Bronze (`behavr.bronze.raw_events`)
 
-| Entity | FQN |
-|--------|-----|
-| Catalog | `behavr` |
-| Bronze schema | `behavr.bronze` |
-| Silver schema | `behavr.silver` |
-| Gold schema | `behavr.gold` |
-| Bronze table | `behavr.bronze.raw_events` |
-| Silver table | `behavr.silver.events` |
-| Gold tables | `behavr.gold.search_metrics`, `…product_metrics`, `…session_metrics`, `…page_metrics`, `…funnel_metrics` |
+- **Role**: Immutable-style landing zone; preserve source fidelity with light normalization only.
+- **Ingestion**: [Databricks Auto Loader](https://docs.databricks.com/en/ingestion/auto-loader/index.html) on JSON (`cloudFiles`), with schema inference and additive schema evolution. When Unity Catalog ACLs block implicit Delta schema migration, evolve table schema explicitly with ALTER TABLE.
+- **State**: Schema location and streaming checkpoints live on a Unity Catalog **volume** (see `pipeline_state_volume` in `pipelines/config.py` and `pipelines/bronze/bronze_raw_events.py`).
+- **Transforms**: SDK-style field renames (for example `siteId` → `event_site_id`, `occurredAt` → `occurred_at`), ingestion columns `_ingested_at`, `_source_file` (from file metadata), `occurred_at_ts`, and partition column **`event_date`** derived from event time.
+- **Write mode**: Append-only streaming into Delta, partitioned by `event_date`.
 
-DDL helpers: `sql/unity_catalog_ddl.sql`.
+### Silver (`behavr.silver.events`)
 
-## Auto Loader (Bronze)
+- **Role**: Canonical event table for analytics: cleaned types, UTC time, flattened `properties`, URL and UTM handling.
+- **Ingestion**: Batch read from Bronze, then **`MERGE INTO`** on **`event_id`** so the latest `occurred_at_utc` wins (deduplication).
+- **Mapping**: Bronze `event_site_id` and legacy `site_id` are coalesced into **`site_id`**; `anonymous_id` and `user_id` into **`user_id`** (see `pipelines/silver/transforms.py`).
+- **Quality**: Rows missing `event_id`, canonical `site_id`, or a parseable event time are dropped before Silver (they remain queryable in Bronze).
 
-- **Format**: `cloudFiles` over JSON (`cloudFiles.format=json`).
-- **Schema**: inference + evolution via `cloudFiles.schemaLocation` under the configured checkpoint base.
-- **Incremental progress**: `checkpointLocation` per stream (see `pipelines/bronze/bronze_raw_events.py`).
-- **Write**: Delta append to `behavr.bronze.raw_events`, partitioned by `event_date`.
+### Gold (`behavr.gold.*`)
 
-Notebooks: `notebooks/01_bronze_raw_events.py`.
+- **Role**: Business metrics and aggregates for dashboards and downstream jobs.
+- **Ingestion**: Read from `behavr.silver.events`, aggregate, then **`MERGE INTO`** each gold table on its natural key so reruns are idempotent.
+- **Scope**: Pipelines support an optional **`for_event_dates`** argument to recompute only selected `event_date` partitions; the Databricks entrypoints under `if __name__ == "__main__"` run a full aggregate recomputation from Silver, merged into Gold by a natural key.
 
-## Incremental processing
+### Medallion principles
 
-| Layer | Mechanism |
-|-------|-----------|
-| Bronze | Structured Streaming + Auto Loader checkpoints |
-| Silver | `MERGE INTO` on `event_id`; optional `since_ingested_at` filter on bronze `_ingested_at` |
-| Gold | `MERGE INTO` on natural keys; optional `for_event_dates` to reaggregate selected partitions only |
+1. Raw and Bronze favor append-only semantics and minimal transformation.
+2. Silver is the deduplicated, analytics-ready event layer.
+3. Gold exposes aggregates and metrics, not raw events.
 
-Maintenance SQL: `sql/optimize_tables.sql` (`OPTIMIZE` / `VACUUM`).
+---
 
-## Repository layout
+## Databricks workflow
 
-```text
-behavr-lakehouse/
-  ├── notebooks/          # Databricks notebook sources
-  ├── pipelines/          # PySpark pipeline modules
-  ├── schemas/            # Example payloads / notes
-  ├── sql/                # DDL, OPTIMIZE, example queries
-  ├── tests/              # PySpark unit tests (transforms / schema)
-  ├── docs/               # Specifications
-  └── README.md
+### Repository on Databricks
+
+Sync this repository into Databricks (Repos, workspace files, or CI-deployed artifacts). Job **`spark_python_task.python_file`** paths must point at the **workspace copy** of each script, for example under `/Workspace/Repos/behavr-lakehouse/...` or `/Workspace/Users/<you>/behavr-lakehouse/...`, not your laptop path.
+
+### Unity Catalog and volumes
+
+- Create catalog **`behavr`** and schemas **`bronze`**, **`silver`**, **`gold`** if they do not exist (see `sql/unity_catalog_ddl.sql`).
+- Ensure the pipeline volume used for Auto Loader schema and checkpoints exists and is writable by the job identity (default in code: `/Volumes/behavr/bronze/pipeline_state`). Override with **`BEHAVR_PIPELINE_STATE_VOLUME`** if your layout differs.
+
+### Environment variables
+
+Set these on the job (or cluster) as needed. Defaults match `LakehouseConfig` in `pipelines/config.py`.
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `BEHAVR_CATALOG` | Unity Catalog name | `behavr` |
+| `BEHAVR_BRONZE_SCHEMA` | Bronze schema | `bronze` |
+| `BEHAVR_SILVER_SCHEMA` | Silver schema | `silver` |
+| `BEHAVR_GOLD_SCHEMA` | Gold schema | `gold` |
+| `BEHAVR_RAW_EVENTS_PATH` | Auto Loader source URI for JSONL | `s3://behavr-lake/raw/events/` |
+| `BEHAVR_PIPELINE_STATE_VOLUME` | UC volume root for schemas + checkpoints | `/Volumes/behavr/bronze/pipeline_state` |
+| `BEHAVR_BRONZE_TABLE` | Bronze table name | `raw_events` |
+| `BEHAVR_SILVER_TABLE` | Silver table name | `events` |
+
+The job’s compute must have permission to read raw storage, read/write the volume, and create or write the Delta tables in Unity Catalog.
+
+### Example scheduled job (bundle-style YAML)
+
+Below is a real job shape: daily schedule, **Bronze → Silver**, then **two Gold tasks in parallel** after Silver (each Gold script only depends on Silver). Adjust `python_file` to your workspace path and add more `task_key` entries for `gold_session_metrics`, `gold_page_metrics`, and `gold_funnel_metrics` if you use them.
+
+```yaml
+resources:
+  jobs:
+    behavr_lakehouse_pipeline:
+      name: behavr_lakehouse_pipeline
+      trigger:
+        pause_status: UNPAUSED
+        periodic:
+          interval: 5
+          unit: MINUTES
+      tasks:
+        - task_key: bronze_raw_events
+          spark_python_task:
+            python_file: /Workspace/Users/ihor.dziuba@gmail.com/behavr-lakehouse/pipelines/bronze/bronze_raw_events.py
+          email_notifications:
+            on_failure:
+              - <email>
+          environment_key: Default
+        - task_key: silver_events_task
+          depends_on:
+            - task_key: bronze_raw_events
+          spark_python_task:
+            python_file: /Workspace/Users/ihor.dziuba@gmail.com/behavr-lakehouse/pipelines/silver/silver_events.py
+          email_notifications:
+            on_failure:
+              - <email>
+          environment_key: Default
+        - task_key: gold_product_metrics
+          depends_on:
+            - task_key: silver_events_task
+          spark_python_task:
+            python_file: /Workspace/Users/ihor.dziuba@gmail.com/behavr-lakehouse/pipelines/gold/gold_product_metrics.py
+          email_notifications:
+            on_failure:
+              - <email>
+          environment_key: Default
+        - task_key: gold_search_metrics
+          depends_on:
+            - task_key: silver_events_task
+          spark_python_task:
+            python_file: /Workspace/Users/ihor.dziuba@gmail.com/behavr-lakehouse/pipelines/gold/gold_search_metrics.py
+          email_notifications:
+            on_failure:
+              - <email>
+          environment_key: Default
+      queue:
+        enabled: true
+      environments:
+        - environment_key: Default
+          spec:
+            environment_version: "5"
+      performance_target: PERFORMANCE_OPTIMIZED
 ```
 
-## Configuration (environment)
+**Suggested additions**: duplicate the Gold task pattern for `pipelines/gold/gold_session_metrics.py`, `gold_page_metrics.py`, and `gold_funnel_metrics.py`, each depending on `silver_events_task` only (they can run concurrently with other Gold tasks).
 
-| Variable | Default |
-|----------|---------|
-| `BEHAVR_CATALOG` | `behavr` |
-| `BEHAVR_BRONZE_SCHEMA` | `bronze` |
-| `BEHAVR_SILVER_SCHEMA` | `silver` |
-| `BEHAVR_GOLD_SCHEMA` | `gold` |
-| `BEHAVR_RAW_EVENTS_PATH` | `s3://behavr-lake/raw/events/` |
-| `BEHAVR_CHECKPOINT_BASE` | `s3://behavr-lake/checkpoints/pipelines` |
-| `BEHAVR_BRONZE_TABLE` | `raw_events` |
-| `BEHAVR_SILVER_TABLE` | `events` |
+### Task scripts
 
-## Local setup
+Each pipeline file is runnable as the driver program: it builds `SparkSession`, loads `LakehouseConfig.from_env()`, prints source/target, and calls the corresponding `run_*` function. This matches `spark_python_task` execution.
 
-1. Python 3.10+ recommended.
-2. Create a virtualenv and install dev dependencies:
+| Task | Script |
+|------|--------|
+| Bronze | `pipelines/bronze/bronze_raw_events.py` |
+| Silver | `pipelines/silver/silver_events.py` |
+| Gold (product) | `pipelines/gold/gold_product_metrics.py` |
+| Gold (search) | `pipelines/gold/gold_search_metrics.py` |
+| Gold (session) | `pipelines/gold/gold_session_metrics.py` |
+| Gold (page) | `pipelines/gold/gold_page_metrics.py` |
+| Gold (funnel) | `pipelines/gold/gold_funnel_metrics.py` |
 
-   ```bash
-   pip install -r requirements.txt
-   ```
+Optional orchestration helpers live in `pipelines/jobs.py`. Notebooks under `notebooks/` mirror the same stages for interactive runs.
 
-3. Run tests (local Spark; requires a **JDK 17–21** compatible with PySpark on your OS; newer JDKs may fail to start Spark locally):
+---
 
-   ```bash
-   pytest tests/
-   ```
+## Tables
 
-4. **Databricks**: add this repo (or a wheel) to a cluster / repo job. Use `pipelines/jobs.py` task functions or import pipeline modules from jobs/notebooks. Bronze streaming requires a Databricks runtime with Auto Loader and access to the raw S3 path and checkpoint location.
+| FQN | Layer | Description |
+|-----|--------|-------------|
+| `behavr.bronze.raw_events` | Bronze | Auto Loader output; raw fields + `_ingested_at`, `_source_file`, `occurred_at_ts`, `event_date` |
+| `behavr.silver.events` | Silver | Deduped events; canonical `site_id`, `user_id`, UTC `occurred_at_utc`, flattened search/product fields, UTM |
+| `behavr.gold.search_metrics` | Gold | Search counts, zero-result searches, sessions by query |
+| `behavr.gold.product_metrics` | Gold | Product views, add-to-cart, purchases, rates |
+| `behavr.gold.session_metrics` | Gold | Sessions, average duration, bounce proxy |
+| `behavr.gold.page_metrics` | Gold | Page views and distinct sessions/users by URL |
+| `behavr.gold.funnel_metrics` | Gold | Event counts by `event_type` as funnel step |
 
-5. **Databricks Connect / local Spark with Delta** is optional for deeper integration tests; primary execution target is Databricks per spec.
+Example SQL for analysts: `sql/example_queries.sql`. Maintenance: `sql/optimize_tables.sql`.
 
-## Example Delta tables (documentation)
+---
 
-| Table | Purpose |
-|-------|---------|
-| `behavr.bronze.raw_events` | Raw JSON fields + `_ingested_at`, `_source_file`, `event_date` |
-| `behavr.silver.events` | Deduped events, flattened properties, UTC times |
-| `behavr.gold.search_metrics` | Queries, counts, zero-result searches |
-| `behavr.gold.product_metrics` | Views, add-to-cart, purchases by product |
-| `behavr.gold.session_metrics` | Sessions, duration, bounce proxy |
-| `behavr.gold.page_metrics` | Page views by URL |
-| `behavr.gold.funnel_metrics` | Counts by `event_type` (funnel step) |
+## How to run
 
-Example SQL: `sql/example_queries.sql`.
+### On Databricks (recommended)
 
-## Observability
+1. Deploy or sync the repo and set environment variables for catalog, raw path, and pipeline volume.
+2. Create the job (for example from the YAML above) so `python_file` paths resolve in Workspace.
+3. Run the job manually once to validate, then rely on the schedule.
 
-Track ingestion lag, counts, and failures via Databricks job metrics, Delta table history, and pipeline logs. Malformed bronze rows remain in Bronze; Silver excludes rows failing minimum quality (`event_id`, `site_id`, `occurred_at`).
+Bronze uses `trigger_once=True` by default in code so each job run processes available files then stops; the next scheduled run picks up new data via checkpoints.
 
-## Specification
+### Locally (tests only)
 
-Full target architecture: `docs/behavr_lakehouse_ai_agent_spec.md`.
+1. Use Python 3.10+ and a virtualenv.
+2. `pip install -r requirements.txt`
+3. `pytest tests/` — tests use a local Spark session when the JVM allows it (see troubleshooting). Transform logic does not require Databricks for unit tests.
+
+### Notebooks
+
+Use `notebooks/01_bronze_raw_events.py`, `02_silver_events.py`, and `03_gold_metrics.py` as Databricks notebook sources for step-by-step debugging.
+
+---
+
+## Troubleshooting
+
+| Symptom | Likely cause | What to check |
+|---------|----------------|---------------|
+| Auto Loader or stream fails with path / permission errors | Raw path or volume ACLs | Confirm `BEHAVR_RAW_EVENTS_PATH` and `BEHAVR_PIPELINE_STATE_VOLUME`; job identity needs read on S3 (or equivalent) and read/write on the UC volume for `schemas/` and `checkpoints/`. |
+| Bronze runs but no new rows | No new files, or checkpoint already advanced | List new files under the raw prefix; inspect checkpoint directory and Auto Loader metrics in the Spark UI. |
+| `python_file` task fails immediately | Wrong Workspace path or repo not synced | Open the path in the Workspace UI; use Repos sync or CI deploy so files match this repository. |
+| Silver empty or very small while Bronze has data | Silver quality filter | Silver requires `event_id`, resolvable `site_id` (`event_site_id` or `site_id`), and parseable `occurred_at`. Inspect Bronze for nulls or bad timestamps. |
+| `MERGE` / Delta errors on Silver or Gold | Schema drift or missing table | Ensure prior stage created the table; compare `DESCRIBE TABLE` history with pipeline expectations; for first Silver run, an overwrite bootstrap path is used when the table does not exist. |
+| Gold counts look stale | Full Silver re-read but partial logic | Gold `MERGE` updates keys present in the aggregate batch; if you need only recent partitions, extend the Gold `__main__` scripts to pass `for_event_dates` (see `run_gold_*` signatures). |
+| `pytest` skips all tests or JVM errors | JDK too new for local PySpark | Use JDK 17–21 for local Spark, or run tests on Databricks / accept skips on incompatible local JDKs (`getSubject` / security manager issues on some JDKs). |
+| Schema evolution surprises in Bronze | New JSON fields | Expected with Auto Loader; downstream Silver uses resilient property extraction. If Silver needs new columns, extend `normalize_silver_events` and redeploy. |
+
+For deep design and acceptance criteria, see `docs/behavr_lakehouse_ai_agent_spec.md`.
